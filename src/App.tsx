@@ -33,8 +33,13 @@ export default function App() {
         trackerRef.current = new Tracker();
         await trackerRef.current.init();
         
+        // Use more flexible constraints for mobile devices (Motorola Edge)
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 1280, height: 720, facingMode: 'user' },
+          video: { 
+            width: { ideal: 640 }, 
+            height: { ideal: 480 }, 
+            facingMode: 'user' 
+          },
         });
         
         if (videoRef.current) {
@@ -44,7 +49,8 @@ export default function App() {
         setIsLoading(false);
       } catch (err: any) {
         console.error(err);
-        setError("Camera access or AI model failed to load.");
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(`Initialization Error: ${msg}. Please ensure camera permissions are granted and try opening in a new tab.`);
         setIsLoading(false);
       }
     };
@@ -53,13 +59,25 @@ export default function App() {
   }, []);
 
   const isProcessingRef = useRef(false);
+  const frameCounterRef = useRef(0);
 
   const gameLoop = async () => {
     if (trackerRef.current && videoRef.current && !isProcessingRef.current) {
       isProcessingRef.current = true;
       try {
-        const data = trackerRef.current.process(videoRef.current);
-        setTrackingData(data);
+        // Ensure video is actually playing
+        if (videoRef.current.paused) {
+          videoRef.current.play().catch(console.error);
+        }
+
+        frameCounterRef.current++;
+        const processHands = frameCounterRef.current % 2 === 0;
+        
+        const data = trackerRef.current.process(videoRef.current, { processHands });
+        setTrackingData(prev => ({
+          face: data.face || prev.face,
+          hands: processHands ? data.hands : prev.hands
+        }));
       } finally {
         isProcessingRef.current = false;
       }
@@ -87,7 +105,7 @@ export default function App() {
         playsInline
         muted
         className="fixed opacity-0 pointer-events-none"
-        style={{ width: '320px', height: '240px' }}
+        style={{ width: '640px', height: '480px' }}
       />
 
       {/* Perspective Background (The Portal) */}
@@ -157,10 +175,10 @@ export default function App() {
             autoPlay
             playsInline
             muted
-            className="w-full h-full object-cover grayscale opacity-30 transition-opacity group-hover:opacity-60"
+            className="w-full h-full object-cover grayscale opacity-30 transition-opacity group-hover:opacity-60 scale-x-[-1]"
           />
           {/* Skeleton Overlay */}
-          <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-50 overflow-visible">
+          <svg className="absolute inset-0 w-full h-full pointer-events-none opacity-50 overflow-visible scale-x-[-1]">
             {trackingData.hands.map((hand, hi) => (
               <g key={hi}>
                 {hand.landmarks.map((l, li) => (
@@ -188,7 +206,8 @@ export default function App() {
               key={i}
               className="fixed z-50 pointer-events-none flex items-center justify-center"
               animate={{ 
-                x: hand.x * window.innerWidth, 
+                // Front cameras are mirrored: 0.0 is right-side of user, 1.0 is left-side
+                x: (1 - hand.x) * window.innerWidth, 
                 y: hand.y * window.innerHeight,
               }}
               transition={{ type: 'spring', damping: 20, stiffness: 200 }}
@@ -229,14 +248,14 @@ export default function App() {
             <div className="flex items-center gap-4 mb-1">
                <span className="text-lg opacity-40">👀</span>
                <div className="w-12 h-[1px] bg-cyan-500/20"></div>
-               <span className="text-lg">🤏</span>
+               <span className="text-lg">✊</span>
             </div>
-            <span className="text-[10px] font-bold uppercase tracking-[0.3em] text-cyan-400">Gaze Lock + Pinch</span>
+            <span className="text-[10px] font-bold uppercase tracking-[0.3em] text-cyan-400">Gaze Lock + Grasp</span>
           </div>
 
           <div className="flex flex-col items-center opacity-40">
-            <div className="w-10 h-10 border border-slate-700 rounded-lg flex items-center justify-center text-lg bg-slate-900/50 grayscale">🤏</div>
-            <span className="text-[9px] uppercase mt-2 tracking-[0.2em] font-mono">Grab</span>
+            <div className="w-10 h-10 border border-slate-700 rounded-lg flex items-center justify-center text-lg bg-slate-900/50 grayscale">✊</div>
+            <span className="text-[9px] uppercase mt-2 tracking-[0.2em] font-mono">Blast</span>
           </div>
         </div>
       </div>
@@ -261,7 +280,7 @@ export default function App() {
               <h2 className="text-6xl font-black italic uppercase tracking-tighter text-white">READY?</h2>
               <p className="text-slate-400 text-sm leading-relaxed max-w-[280px] mx-auto">
                 <span className="text-cyan-400 font-mono text-[10px] uppercase tracking-widest block mb-2">Instructions</span>
-                Move your head to peer through the portal. Use <span className="text-white font-bold">Finger Pinch</span> gestures to pop the intruders.
+                Move your head to peer through the portal. Use <span className="text-white font-bold">Fist Grasp</span> gestures to pop the intruders.
               </p>
             </div>
 
@@ -271,8 +290,22 @@ export default function App() {
                 <p className="text-[9px] font-mono uppercase tracking-[0.3em] text-slate-500">Syncing AI Subsystems...</p>
               </div>
             ) : error ? (
-              <div className="p-4 bg-red-950/30 border border-red-500/30 rounded-xl text-red-500 text-xs font-mono italic">
-                {error}
+              <div className="space-y-4">
+                <div className="p-4 bg-red-950/30 border border-red-500/30 rounded-xl text-red-500 text-xs font-mono italic">
+                  {error}
+                </div>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="w-full bg-slate-800 text-white py-3 rounded-lg text-[10px] font-bold uppercase tracking-widest border border-slate-700 hover:bg-slate-700 transition-colors"
+                >
+                  Retry Connection
+                </button>
+                <button
+                  onClick={() => window.open(window.location.href, '_blank')}
+                  className="w-full bg-cyan-500/10 text-cyan-400 py-3 rounded-lg text-[10px] font-bold uppercase tracking-widest border border-cyan-500/30 hover:bg-cyan-500/20 transition-colors"
+                >
+                  Open in New Tab
+                </button>
               </div>
             ) : (
               <button

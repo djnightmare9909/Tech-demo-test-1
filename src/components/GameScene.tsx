@@ -32,7 +32,7 @@ function TargetMesh({ target, onHit, isLocked }: { target: Target; onHit: (id: s
     <Float speed={isLocked ? 4 : 2} rotationIntensity={isLocked ? 2 : 1} floatIntensity={isLocked ? 2 : 1}>
       <Sphere
         ref={meshRef}
-        args={[0.4, 32, 32]}
+        args={[0.4, 16, 16]}
         position={target.position}
         name={target.id}
       >
@@ -62,12 +62,16 @@ function GameController({
   const [targets, setTargets] = useState<Target[]>([]);
   const [lockedTargetId, setLockedTargetId] = useState<string | null>(null);
   const lastPinchRef = useRef<boolean>(false);
+  
+  // Use a Ref for tracking to avoid stale closures in useFrame
+  const trackingRef = useRef(tracking);
+  trackingRef.current = tracking;
 
   // Spawn targets
   useEffect(() => {
     const interval = setInterval(() => {
       setTargets(prev => {
-        if (prev.length < 15) {
+        if (prev.length < 8) {
           return [
             ...prev,
             {
@@ -75,7 +79,7 @@ function GameController({
               position: [
                 (Math.random() - 0.5) * 15,
                 (Math.random() - 0.5) * 10,
-                -Math.random() * 15 - 5,
+                -Math.random() * 20 - 2, // Spread targets from Z=-2 down to Z=-22 (back of room)
               ] as [number, number, number],
               color: `hsl(${Math.random() * 360}, 80%, 60%)`,
               seed: Math.random() * 10,
@@ -84,69 +88,72 @@ function GameController({
         }
         return prev;
       });
-    }, 800);
+    }, 1500);
     return () => clearInterval(interval);
   }, []);
 
-  useFrame(() => {
-    // 1. TRUE WINDOW EFFECT (Off-axis Projection)
-    // Map tracking to world units (assuming screen is ~20 units wide)
-    if (tracking.face) {
-      const worldWidth = 20;
-      const worldHeight = worldWidth / (size.width / size.height);
-      
-      // Face coordinates map to eye position in front of screen
-      const eyeX = tracking.face.x * (worldWidth / 2);
-      const eyeY = tracking.face.y * (worldHeight / 2);
-      // estimatedZ from tracking is a world unit estimation
-      const eyeZ = Math.max(5, tracking.face.z * 10); 
+  useFrame((state) => {
+    const currentTracking = trackingRef.current;
+    
+    // 1. SMOOTH PORTAL PEERING
+    // We target a position based on face, or center if lost
+    const targetX = currentTracking.face ? currentTracking.face.x * 4.5 : 0;
+    const targetY = currentTracking.face ? currentTracking.face.y * 3.5 : 0;
+    const targetZ = currentTracking.face ? Math.max(3, currentTracking.face.z * 6) : 8;
 
-      camera.position.set(eyeX, eyeY, eyeZ);
+    // Smoothly lerp camera position to eliminate jitter
+    camera.position.x = THREE.MathUtils.lerp(camera.position.x, targetX, 0.15);
+    camera.position.y = THREE.MathUtils.lerp(camera.position.y, targetY, 0.15);
+    camera.position.z = THREE.MathUtils.lerp(camera.position.z, targetZ, 0.15);
 
-      // TRUE OFF-AXIS PROJECTION
-      const near = 0.1;
-      const far = 1000;
-      const ratio = near / eyeZ;
-      const left = (-worldWidth / 2 - eyeX) * ratio;
-      const right = (worldWidth / 2 - eyeX) * ratio;
-      const bottom = (-worldHeight / 2 - eyeY) * ratio;
-      const top = (worldHeight / 2 - eyeY) * ratio;
+    // 2. OFF-AXIS FRUSTUM (Pinned to screen edges at Z=0)
+    const aspectRatio = size.width / size.height;
+    const worldWidth = 10; 
+    const worldHeight = worldWidth / aspectRatio;
+    
+    const near = 0.1;
+    const far = 1000;
+    const ratio = near / camera.position.z;
+    
+    const left = (-worldWidth / 2 - camera.position.x) * ratio;
+    const right = (worldWidth / 2 - camera.position.x) * ratio;
+    const bottom = (-worldHeight / 2 - camera.position.y) * ratio;
+    const top = (worldHeight / 2 - camera.position.y) * ratio;
 
-      camera.projectionMatrix.makePerspective(left, right, top, bottom, near, far);
-      camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-    }
+    camera.projectionMatrix.makePerspective(left, right, top, bottom, near, far);
+    camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
 
-    // 2. PINCH DETECTION & RAYCASTING
+    // 3. HAND RAYCASTING
     let isCurrentlyPinching = false;
-    tracking.hands.forEach(hand => {
+    currentTracking.hands.forEach(hand => {
+      const nx = ((1 - hand.x) - 0.5) * 2; 
+      const ny = (0.5 - hand.y) * 2; 
+      
+      const pointer = new THREE.Vector2(nx, ny);
+      
       if (hand.isPinching) {
         isCurrentlyPinching = true;
         if (!lastPinchRef.current) {
-          const nx = (hand.x - 0.5) * 2;
-          const ny = (hand.y - 0.5) * -2;
-          raycaster.setFromCamera(new THREE.Vector2(nx, ny), camera);
+          raycaster.setFromCamera(pointer, camera);
           const intersects = raycaster.intersectObjects(scene.children, true);
           const hit = intersects.find(i => i.object.name.startsWith('target-'));
           if (hit) handleHit(hit.object.name);
         }
       }
-    });
 
-    // 3. HOVER LOCK
-    if (tracking.hands.length > 0) {
-      const mainHand = tracking.hands[0];
-      raycaster.setFromCamera(new THREE.Vector2((mainHand.x - 0.5) * 2, (mainHand.y - 0.5) * -2), camera);
+      // HOVER/LOCK-ON logic
+      raycaster.setFromCamera(pointer, camera);
       const hover = raycaster.intersectObjects(scene.children, true).find(i => i.object.name.startsWith('target-'));
       const nextId = hover ? hover.object.name : null;
       if (nextId !== lockedTargetId) {
         setLockedTargetId(nextId);
         onLockChange(!!nextId);
       }
-    } else {
-      if (lockedTargetId) {
-        setLockedTargetId(null);
-        onLockChange(false);
-      }
+    });
+
+    if (currentTracking.hands.length === 0 && lockedTargetId) {
+      setLockedTargetId(null);
+      onLockChange(false);
     }
 
     lastPinchRef.current = isCurrentlyPinching;
@@ -174,6 +181,46 @@ function GameController({
   );
 }
 
+function Room() {
+  return (
+    <group position={[0, 0, -10]}>
+      {/* Floor */}
+      <mesh position={[0, -10, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+        <planeGeometry args={[40, 40]} />
+        <meshStandardMaterial color="#0a0f1a" roughness={0.8} />
+      </mesh>
+      <gridHelper args={[40, 20, '#1e293b', '#111827']} position={[0, -9.9, 0]} />
+
+      {/* Ceiling */}
+      <mesh position={[0, 10, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <planeGeometry args={[40, 40]} />
+        <meshStandardMaterial color="#050812" />
+      </mesh>
+
+      {/* Back Wall */}
+      <mesh position={[0, 0, -20]}>
+        <planeGeometry args={[40, 20]} />
+        <meshStandardMaterial color="#02040a" />
+      </mesh>
+      <gridHelper args={[40, 20, '#1e1b4b', '#0f172a']} position={[0, 0, -19.9]} rotation={[Math.PI / 2, 0, 0]} />
+
+      {/* Decorative Corner Pillars */}
+      <mesh position={[-19.5, 0, 0]}>
+        <boxGeometry args={[1, 20, 40]} />
+        <meshStandardMaterial color="#0f172a" />
+      </mesh>
+      <mesh position={[19.5, 0, 0]}>
+        <boxGeometry args={[1, 20, 40]} />
+        <meshStandardMaterial color="#0f172a" />
+      </mesh>
+
+      {/* Distant glow points for orientation */}
+      <pointLight position={[-15, 8, -15]} intensity={0.5} color="#4f46e5" />
+      <pointLight position={[15, -8, -15]} intensity={0.5} color="#ec4899" />
+    </group>
+  );
+}
+
 export default function GameScene({ 
   tracking, 
   onScore,
@@ -186,20 +233,15 @@ export default function GameScene({
   return (
     <Canvas shadows style={{ background: 'transparent' }}>
       <PerspectiveCamera makeDefault position={[0, 0, 5]} fov={75} />
-      <color attach="background" args={['#050608']} />
-      <fog attach="fog" args={['#050608', 8, 20]} />
+      <color attach="background" args={['#020408']} />
       
       <GameController tracking={tracking} onScore={onScore} onLockChange={onLockChange} />
       
-      {/* Decorative Grid for depth perception */}
-      <gridHelper 
-        args={[40, 40, '#1e293b', '#0f172a']} 
-        rotation={[Math.PI / 2, 0, 0]} 
-        position={[0, 0, -15]} 
-      />
+      <Room />
       
-      {/* Distant ambient light to catch edges */}
-      <pointLight position={[-10, -10, -10]} intensity={0.5} color="#22d3ee" />
+      <ambientLight intensity={0.4} />
+      <pointLight position={[0, 10, -5]} intensity={4} color="#4f46e5" />
+      <pointLight position={[-15, -5, -10]} intensity={2} color="#1e1b4b" />
     </Canvas>
   );
 }

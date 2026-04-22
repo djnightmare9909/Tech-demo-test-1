@@ -29,24 +29,30 @@ export class Tracker {
     this.faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
       baseOptions: {
         modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
-        delegate: "GPU", // Switch back to GPU for 60fps performance
+        delegate: "GPU",
       },
       runningMode: "VIDEO",
       outputFaceBlendshapes: true,
+      minFaceDetectionConfidence: 0.3,
+      minFacePresenceConfidence: 0.3,
+      minTrackingConfidence: 0.3,
     });
 
     this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
       baseOptions: {
         modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
-        delegate: "GPU", // Switch back to GPU
+        delegate: "GPU",
       },
       runningMode: "VIDEO",
-      numHands: 2,
+      numHands: 1,
+      minHandDetectionConfidence: 0.25, // More stable than 0.15
+      minHandPresenceConfidence: 0.25,
+      minTrackingConfidence: 0.25,
     });
     console.log("AI Models Initialized (GPU Mode)");
   }
 
-  process(video: HTMLVideoElement): TrackingData {
+  process(video: HTMLVideoElement, options: { processHands?: boolean } = {}): TrackingData {
     const now = performance.now();
     
     // Ensure video is ready and has dimensions
@@ -56,11 +62,11 @@ export class Tracker {
     this.lastVideoTime = video.currentTime;
 
     const faceResult = this.faceLandmarker?.detectForVideo(video, now);
-    const handResult = this.handLandmarker?.detectForVideo(video, now);
+    const handResult = (options.processHands !== false) ? this.handLandmarker?.detectForVideo(video, now) : null;
 
     return {
       face: this.parseFace(faceResult),
-      hands: this.parseHands(handResult),
+      hands: (options.processHands !== false) ? this.parseHands(handResult) : [],
     };
   }
 
@@ -70,17 +76,13 @@ export class Tracker {
     const landmarks = result.faceLandmarks[0];
     const nose = landmarks[4];
     
-    // Estimate distance using inter-ocular distance (Landmarks 33 and 263 are eyes)
+    // 1. Z Estimation (Stability first)
     const eyeL = landmarks[33];
     const eyeR = landmarks[263];
     const dx = eyeL.x - eyeR.x;
     const dy = eyeL.y - eyeR.y;
-    const dist = Math.sqrt(dx*dx + dy*dy);
-    
-    // A typical inter-ocular distance in real world is ~63mm.
-    // In image space, the smaller the dist, the further away the head.
-    // This provides a much more stable Z than landmarks[4].z
-    const estimatedZ = 0.15 / dist; // Simple inverse mapping for world units
+    const iodPixels = Math.sqrt(dx*dx + dy*dy);
+    const estimatedZ = 0.15 / iodPixels; // Back to stable mapping
 
     let gazeX = 0;
     let gazeY = 0;
@@ -99,7 +101,7 @@ export class Tracker {
     }
 
     return {
-      x: (nose.x - 0.5) * 2,
+      x: (0.5 - nose.x) * 2, // RAW -1 to 1 for GameScene to handle
       y: (nose.y - 0.5) * -2,
       z: estimatedZ,
       gazeX,
@@ -111,20 +113,37 @@ export class Tracker {
     if (!result?.landmarks) return [];
 
     return result.landmarks.map((hand) => {
-      const thumbTip = hand[4];
-      const indexTip = hand[8];
+      const wrist = hand[0];
+      const tipIndices = [8, 12, 16, 20];
+      const mcpIndices = [5, 9, 13, 17];
       
-      // Calculate Euclidean distance between thumb and index tips
-      const dist = Math.sqrt(
-        Math.pow(thumbTip.x - indexTip.x, 2) +
-        Math.pow(thumbTip.y - indexTip.y, 2) +
-        Math.pow(thumbTip.z - indexTip.z, 2)
-      );
+      let foldedFingers = 0;
+      for (let i = 0; i < tipIndices.length; i++) {
+        const tip = hand[tipIndices[i]];
+        const mcp = hand[mcpIndices[i]];
+        
+        // Multi-axis distance for fist detection (more robust at distance)
+        const dX = tip.x - wrist.x;
+        const dY = tip.y - wrist.y;
+        const dZ = tip.z - wrist.z;
+        const tipDist = Math.sqrt(dX*dX + dY*dY + dZ*dZ);
+
+        const mX = mcp.x - wrist.x;
+        const mY = mcp.y - wrist.y;
+        const mZ = mcp.z - wrist.z;
+        const mcpDist = Math.sqrt(mX*mX + mY*mY + mZ*mZ);
+        
+        if (tipDist < mcpDist * 1.1) { // Adding a small buffer for distance jitter
+          foldedFingers++;
+        }
+      }
+
+      const isFist = foldedFingers >= 2; // Lowered from 3 to 2 for easier trigger at 2m distance
 
       return {
-        isPinching: dist < 0.05,
-        x: indexTip.x,
-        y: indexTip.y,
+        isPinching: isFist,
+        x: hand[9].x, 
+        y: hand[9].y,
         landmarks: hand.map(l => ({ x: l.x, y: l.y, z: l.z }))
       };
     });
