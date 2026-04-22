@@ -1,0 +1,6 @@
+{
+  "name": "Portal Raiders: Pinch & Track",
+  "description": "An interactive 3D game using head-tracking for perspective and finger-pinch gestures to destroy targets.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": []
+}
